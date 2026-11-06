@@ -17,13 +17,24 @@ const client = new MongoClient(uri, {
 
 function verifyToken(req, res, next) {
   const auth = req.headers.authorization;
-  if (!auth) return res.status(401).send({ message: "Unauthorized" });
+  if (!auth) return res.status(401).send({ message: "Unauthorized - Please login again" });
   const token = auth.split(" ")[1];
   jw.verify(token, process.env.JWT_SECRET, (err, decoded) => {
-    if (err) return res.status(403).send({ message: "Forbidden" });
+    if (err) return res.status(403).send({ message: "Forbidden - Token expired, login again" });
     req.decoded = decoded;
     next();
   });
+}
+
+// Date present + future kina check
+function isPastDate(dateStr) {
+  if (!dateStr) return true;
+  const today = new Date().toISOString().split("T")[0];
+  return new Date(dateStr) < new Date(today);
+}
+
+function isValidId(id) {
+  return ObjectId.isValid(id);
 }
 
 async function run() {
@@ -61,6 +72,7 @@ async function run() {
     });
 
     app.get("/api/events/:id", async (req, res) => {
+      if (!isValidId(req.params.id)) return res.status(400).send({ message: "Invalid event id" });
       const result = await eventsCol.findOne({ _id: new ObjectId(req.params.id) });
       res.send(result);
     });
@@ -72,21 +84,74 @@ async function run() {
     });
 
     app.post("/api/events", verifyToken, async (req, res) => {
-      const result = await eventsCol.insertOne(req.body);
-      res.send(result);
+      try {
+        const { title, description, location, eventType, eventDate, thumbnail, creatorEmail } = req.body;
+        // Assignment: sob field lagbe
+        if (!title || !description || !location || !eventType || !eventDate || !thumbnail) {
+          return res.status(400).send({ message: "All fields are required" });
+        }
+        // Assignment: date present + future hote hobe
+        if (isPastDate(eventDate)) {
+          return res.status(400).send({ message: "Event date must be present and future" });
+        }
+        // Creator token er email diyei hote hobe
+        if (creatorEmail && creatorEmail !== req.decoded.email) {
+          return res.status(403).send({ message: "Not authorized" });
+        }
+        const doc = { ...req.body, creatorEmail: req.decoded.email };
+        delete doc._id;
+        const result = await eventsCol.insertOne(doc);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: err.message });
+      }
     });
 
     app.put("/api/events/:id", verifyToken, async (req, res) => {
-      const result = await eventsCol.updateOne(
-        { _id: new ObjectId(req.params.id) },
-        { $set: req.body }
-      );
-      res.send(result);
+      try {
+        if (!isValidId(req.params.id)) return res.status(400).send({ message: "Invalid event id" });
+        const { title, description, location, eventType, eventDate, thumbnail } = req.body;
+
+        if (!title || !description || !location || !eventType || !eventDate || !thumbnail) {
+          return res.status(400).send({ message: "All fields are required" });
+        }
+        if (isPastDate(eventDate)) {
+          return res.status(400).send({ message: "Event date must be present and future" });
+        }
+
+        const event = await eventsCol.findOne({ _id: new ObjectId(req.params.id) });
+        if (!event) return res.status(404).send({ message: "Event not found" });
+        if (event.creatorEmail !== req.decoded.email) {
+          return res.status(403).send({ message: "Not authorized - only creator can edit" });
+        }
+
+        // FIX: _id ke $set theke bad dao, nahole 【entity-MongoDB¦canonical_name=MongoDB】 error dey
+        const { _id, ...updateData } = req.body;
+        const result = await eventsCol.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { title, description, location, eventType, eventDate, thumbnail, ...updateData, title, description, location, eventType, eventDate, thumbnail } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: err.message });
+      }
     });
 
     app.delete("/api/events/:id", verifyToken, async (req, res) => {
-      const result = await eventsCol.deleteOne({ _id: new ObjectId(req.params.id) });
-      res.send(result);
+      try {
+        if (!isValidId(req.params.id)) return res.status(400).send({ message: "Invalid event id" });
+        const event = await eventsCol.findOne({ _id: new ObjectId(req.params.id) });
+        if (!event) return res.status(404).send({ message: "Event not found" });
+        if (event.creatorEmail !== req.decoded.email) {
+          return res.status(403).send({ message: "Not authorized - only creator can delete" });
+        }
+        const result = await eventsCol.deleteOne({ _id: new ObjectId(req.params.id) });
+        // Ei event e jara join korsilo tader record o delete
+        await joinedCol.deleteMany({ eventId: req.params.id });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: err.message });
+      }
     });
 
     app.post("/api/joined", verifyToken, async (req, res) => {
@@ -109,7 +174,9 @@ async function run() {
     });
 
     app.delete("/api/joined/:eventId", verifyToken, async (req, res) => {
-      const result = await joinedCol.deleteOne({ eventId: req.params.eventId, userEmail: req.query.email });
+      // FIX: age sudhu query.email khujto, ekhon token er email o use korbe
+      const email = req.query.email || req.decoded.email;
+      const result = await joinedCol.deleteOne({ eventId: req.params.eventId, userEmail: email });
       res.send(result);
     });
 
